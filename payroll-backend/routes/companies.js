@@ -2,9 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const authenticateToken = require('../middleware/auth');
 
 // Get all companies
-router.get('/', async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM companies ORDER BY company_name');
         res.json(result.rows);
@@ -14,7 +15,7 @@ router.get('/', async (req, res) => {
 });
 
 // Get a single company
-router.get('/:id', async (req, res) => {
+router.get('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('SELECT * FROM companies WHERE company_id = $1', [id]);
@@ -28,7 +29,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Create a new company
-router.post('/', async (req, res) => {
+router.post('/', authenticateToken, async (req, res) => {
     try {
         const { company_name, contact_person, email, phone, address } = req.body;
         const result = await db.query(
@@ -42,7 +43,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update a company
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const { company_name, contact_person, email, phone, address } = req.body;
@@ -60,7 +61,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete a company
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('DELETE FROM companies WHERE company_id = $1 RETURNING *', [id]);
@@ -74,7 +75,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Get all employees for a company
-router.get('/:id/employees', async (req, res) => {
+router.get('/:id/employees', authenticateToken, async (req, res) =>  {
     try {
         const { id } = req.params;
         const result = await db.query('SELECT * FROM employees WHERE company_id = $1', [id]);

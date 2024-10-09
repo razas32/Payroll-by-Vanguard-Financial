@@ -2,9 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const authenticateToken = require('../middleware/auth');
 
 // Get all payroll entries
-router.get('/', async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM payroll_entries ORDER BY pay_period_start DESC');
         res.json(result.rows);
@@ -14,7 +15,7 @@ router.get('/', async (req, res) => {
 });
 
 // Get a single payroll entry
-router.get('/:id', async (req, res) => {
+router.get('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('SELECT * FROM payroll_entries WHERE payroll_id = $1', [id]);
@@ -28,7 +29,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Create a new payroll entry
-router.post('/', async (req, res) => {
+router.post('/', authenticateToken, async (req, res) => {
     try {
         const {
             employee_id, pay_period_start, pay_period_end, hours_worked,
@@ -50,7 +51,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update a payroll entry
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const {
@@ -78,7 +79,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete a payroll entry
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('DELETE FROM payroll_entries WHERE payroll_id = $1 RETURNING *', [id]);
@@ -92,7 +93,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Get payroll entries for a specific date range
-router.get('/range/:start/:end', async (req, res) => {
+router.get('/range/:start/:end', authenticateToken, async (req, res) => {
     try {
         const { start, end } = req.params;
         const result = await db.query(
@@ -106,7 +107,7 @@ router.get('/range/:start/:end', async (req, res) => {
 });
 
 // Calculate total payroll for a specific date range
-router.get('/total/:start/:end', async (req, res) => {
+router.get('/total/:start/:end', authenticateToken, async (req, res) => {
     try {
         const { start, end } = req.params;
         const result = await db.query(

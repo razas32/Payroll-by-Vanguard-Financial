@@ -2,9 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const authenticateToken = require('../middleware/auth');
 
 // Get all employees
-router.get('/', async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM employees ORDER BY last_name, first_name');
         res.json(result.rows);
@@ -14,7 +15,7 @@ router.get('/', async (req, res) => {
 });
 
 // Get a single employee
-router.get('/:id', async (req, res) => {
+router.get('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('SELECT * FROM employees WHERE employee_id = $1', [id]);
@@ -28,7 +29,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Create a new employee
-router.post('/', async (req, res) => {
+router.post('/', authenticateToken, async (req, res) => {
     try {
         const { 
             company_id, last_name, first_name, date_of_birth, full_address, email, 
@@ -53,7 +54,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update an employee
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const { 
@@ -86,7 +87,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete an employee (soft delete by setting is_active to false)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query(
@@ -103,7 +104,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Get all payroll entries for an employee
-router.get('/:id/payroll', async (req, res) => {
+router.get('/:id/payroll', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await db.query('SELECT * FROM payroll_entries WHERE employee_id = $1 ORDER BY pay_period_start DESC', [id]);
