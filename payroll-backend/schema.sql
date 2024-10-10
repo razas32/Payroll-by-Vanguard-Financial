@@ -2,117 +2,146 @@
 CREATE TYPE pay_type_enum AS ENUM ('HOURLY', 'SALARY');
 CREATE TYPE pay_schedule_enum AS ENUM ('WEEKLY', 'BIWEEKLY', 'MONTHLY');
 
--- Companies table
+-- Create users table
+CREATE TABLE users (
+  user_id SERIAL PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  user_type VARCHAR(20) NOT NULL CHECK (user_type IN ('accountant', 'client')),
+  is_verified BOOLEAN DEFAULT FALSE,
+  verification_token VARCHAR(255),
+  reset_token VARCHAR(255),
+  reset_token_expiry TIMESTAMP,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create accountants table
+CREATE TABLE accountants (
+  accountant_id SERIAL PRIMARY KEY,
+  user_id INTEGER UNIQUE REFERENCES users(user_id),
+  first_name VARCHAR(100) NOT NULL,
+  last_name VARCHAR(100) NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create companies table
 CREATE TABLE companies (
-    company_id SERIAL PRIMARY KEY,
-    company_name VARCHAR(255) NOT NULL,
-    contact_person VARCHAR(255),
-    email VARCHAR(255) UNIQUE NOT NULL,
-    phone VARCHAR(20),
-    address TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  company_id SERIAL PRIMARY KEY,
+  user_id INTEGER UNIQUE REFERENCES users(user_id),
+  company_name VARCHAR(255) NOT NULL,
+  contact_person VARCHAR(255),
+  phone VARCHAR(20),
+  address TEXT,
+  accountant_id INTEGER REFERENCES accountants(accountant_id),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Employees table
+-- Create employees table
 CREATE TABLE employees (
-    employee_id SERIAL PRIMARY KEY,
-    company_id INTEGER REFERENCES companies(company_id),
-    last_name VARCHAR(100) NOT NULL,
-    first_name VARCHAR(100) NOT NULL,
-    date_of_birth DATE NOT NULL,
-    full_address TEXT NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    phone_number VARCHAR(20) NOT NULL,
-    sin VARCHAR(9) NOT NULL,
-    start_date DATE NOT NULL,
-    position VARCHAR(100) NOT NULL,
-    pay_type pay_type_enum NOT NULL,
-    pay_rate NUMERIC(10, 2) NOT NULL,
-    pay_schedule pay_schedule_enum NOT NULL,
-    institution_number VARCHAR(3),
-    transit_number VARCHAR(5),
-    account_number VARCHAR(12),
-    consent_electronic_documents BOOLEAN NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  employee_id SERIAL PRIMARY KEY,
+  company_id INTEGER REFERENCES companies(company_id),
+  last_name VARCHAR(100) NOT NULL,
+  first_name VARCHAR(100) NOT NULL,
+  date_of_birth DATE NOT NULL,
+  full_address TEXT NOT NULL,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  phone_number VARCHAR(20) NOT NULL,
+  sin VARCHAR(9) NOT NULL,
+  start_date DATE NOT NULL,
+  position VARCHAR(100) NOT NULL,
+  pay_type pay_type_enum NOT NULL,
+  pay_rate NUMERIC(10, 2) NOT NULL,
+  pay_schedule pay_schedule_enum NOT NULL,
+  institution_number VARCHAR(3),
+  transit_number VARCHAR(5),
+  account_number VARCHAR(12),
+  consent_electronic_documents BOOLEAN NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Employee offboarding information
+-- Create employee_offboarding table
 CREATE TABLE employee_offboarding (
-    offboarding_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id) UNIQUE,
-    reason_for_leaving TEXT,
-    last_day_worked DATE NOT NULL,
-    payout_accrued_vacation BOOLEAN NOT NULL,
-    callback_date DATE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  offboarding_id SERIAL PRIMARY KEY,
+  employee_id INTEGER REFERENCES employees(employee_id) UNIQUE,
+  reason_for_leaving TEXT,
+  last_day_worked DATE NOT NULL,
+  payout_accrued_vacation BOOLEAN NOT NULL,
+  callback_date DATE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Payroll entries table
+-- Create payroll_entries table
 CREATE TABLE payroll_entries (
-    payroll_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id),
-    pay_period_start DATE NOT NULL,
-    pay_period_end DATE NOT NULL,
-    hours_worked NUMERIC(8, 2),
-    overtime_hours NUMERIC(8, 2) DEFAULT 0,
-    gross_pay NUMERIC(10, 2) NOT NULL,
-    deductions NUMERIC(10, 2) DEFAULT 0,
-    net_pay NUMERIC(10, 2) NOT NULL,
-    payment_date DATE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  payroll_id SERIAL PRIMARY KEY,
+  employee_id INTEGER REFERENCES employees(employee_id),
+  pay_period_start DATE NOT NULL,
+  pay_period_end DATE NOT NULL,
+  hours_worked NUMERIC(8, 2),
+  overtime_hours NUMERIC(8, 2) DEFAULT 0,
+  gross_pay NUMERIC(10, 2) NOT NULL,
+  deductions NUMERIC(10, 2) DEFAULT 0,
+  net_pay NUMERIC(10, 2) NOT NULL,
+  payment_date DATE NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Vacation accrual table
+-- Create vacation_accrual table
 CREATE TABLE vacation_accrual (
-    accrual_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id),
-    accrual_date DATE NOT NULL,
-    hours_accrued NUMERIC(8, 2) NOT NULL,
-    hours_used NUMERIC(8, 2) DEFAULT 0,
-    balance NUMERIC(8, 2) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  accrual_id SERIAL PRIMARY KEY,
+  employee_id INTEGER REFERENCES employees(employee_id),
+  accrual_date DATE NOT NULL,
+  hours_accrued NUMERIC(8, 2) NOT NULL,
+  hours_used NUMERIC(8, 2) DEFAULT 0,
+  balance NUMERIC(8, 2) NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Support for employee benefits
+-- Create benefits table
 CREATE TABLE benefits (
-    benefit_id SERIAL PRIMARY KEY,
-    benefit_name VARCHAR(100) NOT NULL,
-    benefit_description TEXT
+  benefit_id SERIAL PRIMARY KEY,
+  benefit_name VARCHAR(100) NOT NULL,
+  benefit_description TEXT
 );
 
+-- Create employee_benefits table
 CREATE TABLE employee_benefits (
-    employee_benefit_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id),
-    benefit_id INTEGER REFERENCES benefits(benefit_id),
-    enrollment_date DATE NOT NULL,
-    contribution_amount NUMERIC(10, 2),
-    is_active BOOLEAN DEFAULT TRUE
+  employee_benefit_id SERIAL PRIMARY KEY,
+  employee_id INTEGER REFERENCES employees(employee_id),
+  benefit_id INTEGER REFERENCES benefits(benefit_id),
+  enrollment_date DATE NOT NULL,
+  contribution_amount NUMERIC(10, 2),
+  is_active BOOLEAN DEFAULT TRUE
 );
 
--- Document management for important employee files
+-- Create employee_documents table
 CREATE TABLE employee_documents (
-    document_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id),
-    document_type VARCHAR(50) NOT NULL,
-    file_name VARCHAR(255) NOT NULL,
-    upload_date DATE NOT NULL,
-    expiry_date DATE,
-    document_path TEXT NOT NULL
+  document_id SERIAL PRIMARY KEY,
+  employee_id INTEGER REFERENCES employees(employee_id),
+  document_type VARCHAR(50) NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  upload_date DATE NOT NULL,
+  expiry_date DATE,
+  document_path TEXT NOT NULL
 );
 
 -- Create indexes for faster queries
+CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_employee_company ON employees(company_id);
 CREATE INDEX idx_payroll_employee ON payroll_entries(employee_id);
 CREATE INDEX idx_payroll_period ON payroll_entries(pay_period_start, pay_period_end);
 CREATE INDEX idx_vacation_employee ON vacation_accrual(employee_id);
 CREATE INDEX idx_employee_benefits ON employee_benefits(employee_id);
 CREATE INDEX idx_employee_documents ON employee_documents(employee_id);
+CREATE INDEX idx_company_accountant ON companies(accountant_id);
+
 
 -- Optional Tables and Fields (still commented out for future use)
 
