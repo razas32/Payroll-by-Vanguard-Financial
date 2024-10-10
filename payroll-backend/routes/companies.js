@@ -24,13 +24,13 @@ router.get('/', authenticateToken, authorizeAccountant, [
 
     const countResult = await db.query(
       'SELECT COUNT(*) FROM companies WHERE accountant_id = $1 AND (company_name ILIKE $2 OR contact_person ILIKE $2 OR email ILIKE $2)',
-      [req.user.userId, search]
+      [req.user.accountantId, search]
     );
     const totalCompanies = parseInt(countResult.rows[0].count);
 
     const result = await db.query(
       'SELECT * FROM companies WHERE accountant_id = $1 AND (company_name ILIKE $2 OR contact_person ILIKE $2 OR email ILIKE $2) ORDER BY company_name LIMIT $3 OFFSET $4',
-      [req.user.userId, search, limit, offset]
+      [req.user.accountantId, search, limit, offset]
     );
 
     res.json({
@@ -40,7 +40,8 @@ router.get('/', authenticateToken, authorizeAccountant, [
       totalCompanies
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in get all companies:', err);
+    res.status(500).json({ error: 'An error occurred while fetching companies' });
   }
 });
 
@@ -55,13 +56,20 @@ router.get('/:id', authenticateToken, authorizeClientOrAccountant, [
 
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT * FROM companies WHERE company_id = $1', [id]);
+    let result;
+    if (req.user.userType === 'accountant') {
+      result = await db.query('SELECT * FROM companies WHERE company_id = $1 AND accountant_id = $2', [id, req.user.accountantId]);
+    } else {
+      result = await db.query('SELECT * FROM companies WHERE company_id = $1', [id]);
+    }
+    
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Company not found' });
     }
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in get single company:', err);
+    res.status(500).json({ error: 'An error occurred while fetching the company' });
   }
 });
 
@@ -82,14 +90,15 @@ router.post('/', authenticateToken, authorizeAccountant, [
     const { company_name, contact_person, email, phone, address } = req.body;
     const result = await db.query(
       'INSERT INTO companies (company_name, contact_person, email, phone, address, accountant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [company_name, contact_person, email, phone, address, req.user.userId]
+      [company_name, contact_person, email, phone, address, req.user.accountantId]
     );
     
     await logAudit(req.user.userId, 'accountant', 'create_company', result.rows[0].company_id);
     
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in create company:', err);
+    res.status(500).json({ error: 'An error occurred while creating the company' });
   }
 });
 
@@ -147,11 +156,11 @@ router.put('/:id', authenticateToken, authorizeClientOrAccountant, [
       UPDATE companies 
       SET ${updateFields.join(', ')}
       WHERE company_id = $${paramCount} 
-      ${req.user.role === 'client' ? `AND company_id = $${paramCount + 1}` : `AND accountant_id = $${paramCount + 1}`} 
+      ${req.user.userType === 'client' ? `AND company_id = $${paramCount + 1}` : `AND accountant_id = $${paramCount + 1}`} 
       RETURNING *
     `;
 
-    values.push(id, req.user.role === 'client' ? req.user.companyId : req.user.userId);
+    values.push(id, req.user.userType === 'client' ? req.user.companyId : req.user.accountantId);
 
     const result = await db.query(query, values);
 
@@ -159,11 +168,12 @@ router.put('/:id', authenticateToken, authorizeClientOrAccountant, [
       return res.status(404).json({ message: 'Company not found or you do not have permission to update it' });
     }
 
-    await logAudit(req.user.userId, req.user.role, 'update_company', id);
+    await logAudit(req.user.userId, req.user.userType, 'update_company', id);
 
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in update company:', err);
+    res.status(500).json({ error: 'An error occurred while updating the company' });
   }
 });
 
@@ -178,7 +188,7 @@ router.delete('/:id', authenticateToken, authorizeAccountant, [
 
   try {
     const { id } = req.params;
-    const result = await db.query('DELETE FROM companies WHERE company_id = $1 AND accountant_id = $2 RETURNING *', [id, req.user.userId]);
+    const result = await db.query('DELETE FROM companies WHERE company_id = $1 AND accountant_id = $2 RETURNING *', [id, req.user.accountantId]);
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Company not found or you do not have permission to delete it' });
     }
@@ -187,7 +197,8 @@ router.delete('/:id', authenticateToken, authorizeAccountant, [
 
     res.json({ message: 'Company deleted successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in delete company:', err);
+    res.status(500).json({ error: 'An error occurred while deleting the company' });
   }
 });
 
@@ -204,7 +215,7 @@ router.post('/associate/:companyId', authenticateToken, authorizeAccountant, [
     const { companyId } = req.params;
     const result = await db.query(
       'UPDATE companies SET accountant_id = $1 WHERE company_id = $2 AND accountant_id IS NULL RETURNING *',
-      [req.user.userId, companyId]
+      [req.user.accountantId, companyId]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Company not found or already associated with an accountant' });
@@ -214,7 +225,8 @@ router.post('/associate/:companyId', authenticateToken, authorizeAccountant, [
 
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in associate company:', err);
+    res.status(500).json({ error: 'An error occurred while associating with the company' });
   }
 });
 

@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "setup-db": "node db_setup.js",
-    "test": "NODE_ENV=test jest --runInBand"
+    "test": "cross-env NODE_ENV=test jest --runInBand --setupFilesAfterEnv ./jest.setup.js --forceExit"
+  },
+  "jest": {
+    "testEnvironment": "node"
   },
   "keywords": [],
   "author": "",
@@ -24,7 +26,8 @@
     "sanitize-html": "^2.13.1"
   },
   "devDependencies": {
-    "jest": "^29.7.0",
-    "supertest": "^7.0.0"
+    "cross-env": "^7.0.3",
+    "jest": "^27.0.6",
+    "supertest": "^6.1.3"
   }
 }

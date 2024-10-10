@@ -13,56 +13,73 @@ router.post('/register', [
   body('password').isLength({ min: 8 }),
   body('userType').isIn(['accountant', 'client'])
 ], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
-  try {
-    const { email, password, userType } = req.body;
-
-    // Check if user already exists
-    const userExists = await db.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (userExists.rows.length > 0) {
-      return res.status(400).json({ error: 'User already exists' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
-
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Generate verification token
-    const verificationToken = crypto.randomBytes(20).toString('hex');
-
-    // Insert user into database
-    const result = await db.query(
-      'INSERT INTO users (email, password, user_type, verification_token) VALUES ($1, $2, $3, $4) RETURNING user_id',
-      [email, hashedPassword, userType, verificationToken]
-    );
-
-    const userId = result.rows[0].user_id;
-
-    // Insert into respective table based on user type
-    if (userType === 'accountant') {
-      await db.query('INSERT INTO accountants (user_id) VALUES ($1)', [userId]);
-    } else {
-      await db.query('INSERT INTO companies (user_id) VALUES ($1)', [userId]);
+  
+    try {
+      const { email, password, userType } = req.body;
+  
+      // Check if user already exists
+      const userExists = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+      if (userExists.rows.length > 0) {
+        return res.status(400).json({ error: 'User already exists' });
+      }
+  
+      // Hash password
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+  
+      // Generate verification token
+      const verificationToken = crypto.randomBytes(20).toString('hex');
+  
+      // Start a transaction
+      const client = await db.getClient();
+      try {
+        await client.query('BEGIN');
+  
+        // Insert user into database
+        const userResult = await client.query(
+          'INSERT INTO users (email, password, user_type, verification_token) VALUES ($1, $2, $3, $4) RETURNING user_id',
+          [email, hashedPassword, userType, verificationToken]
+        );
+  
+        const userId = userResult.rows[0].user_id;
+  
+        // Insert into respective table based on user type
+        if (userType === 'accountant') {
+          await client.query('INSERT INTO accountants (user_id) VALUES ($1)', [userId]);
+        } else if (userType === 'client') {
+          // For clients, we create a company with a default name
+          await client.query(
+            'INSERT INTO companies (user_id, company_name) VALUES ($1, $2)',
+            [userId, 'Default Company Name']
+          );
+        }
+  
+        await client.query('COMMIT');
+  
+        // Send verification email
+        const verificationLink = `http://localhost:3000/verify-email?token=${verificationToken}`;
+        await sendEmail(
+          email,
+          'Verify Your Email',
+          `Please click on the following link to verify your email: ${verificationLink}`
+        );
+  
+        res.status(201).json({ message: 'User registered successfully. Please check your email to verify your account.' });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: 'Server error' });
     }
-
-    // Send verification email
-    const verificationLink = `http://localhost:3000/verify-email?token=${verificationToken}`;
-    await sendEmail(
-      email,
-      'Verify Your Email',
-      `Please click on the following link to verify your email: ${verificationLink}`
-    );
-
-    res.status(201).json({ message: 'User registered successfully. Please check your email to verify your account.' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+  });
 
 // User Login
 router.post('/login', [

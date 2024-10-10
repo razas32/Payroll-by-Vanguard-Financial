@@ -26,6 +26,12 @@ router.get('/company/:companyId', authenticateToken, authorizeAccountant, [
     const startDate = req.query.startDate || '1900-01-01';
     const endDate = req.query.endDate || '9999-12-31';
 
+    // Check if the accountant has access to this company
+    const companyCheck = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
+    if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
+      return res.status(403).json({ error: 'You do not have permission to access this company\'s payroll' });
+    }
+
     const countResult = await db.query(
       `SELECT COUNT(*) FROM payroll_entries pe
        JOIN employees e ON pe.employee_id = e.employee_id
@@ -50,7 +56,8 @@ router.get('/company/:companyId', authenticateToken, authorizeAccountant, [
       totalEntries
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in get all payroll entries:', err);
+    res.status(500).json({ error: 'An error occurred while fetching payroll entries' });
   }
 });
 
@@ -65,13 +72,20 @@ router.get('/:id', authenticateToken, authorizeAccountant, [
 
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT * FROM payroll_entries WHERE payroll_id = $1', [id]);
+    const result = await db.query(
+      `SELECT pe.* FROM payroll_entries pe
+       JOIN employees e ON pe.employee_id = e.employee_id
+       JOIN companies c ON e.company_id = c.company_id
+       WHERE pe.payroll_id = $1 AND c.accountant_id = $2`,
+      [id, req.user.accountantId]
+    );
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Payroll entry not found' });
+      return res.status(404).json({ message: 'Payroll entry not found or you do not have permission to view it' });
     }
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in get single payroll entry:', err);
+    res.status(500).json({ error: 'An error occurred while fetching the payroll entry' });
   }
 });
 
@@ -98,6 +112,15 @@ router.post('/', authenticateToken, authorizeAccountant, [
       overtime_hours, gross_pay, deductions, net_pay, payment_date
     } = req.body;
 
+    // Check if the employee belongs to a company managed by this accountant
+    const employeeCheck = await db.query(
+      'SELECT c.accountant_id FROM employees e JOIN companies c ON e.company_id = c.company_id WHERE e.employee_id = $1',
+      [employee_id]
+    );
+    if (employeeCheck.rows.length === 0 || employeeCheck.rows[0].accountant_id !== req.user.accountantId) {
+      return res.status(403).json({ error: 'You do not have permission to create payroll entries for this employee' });
+    }
+
     const result = await db.query(
       `INSERT INTO payroll_entries (
         employee_id, pay_period_start, pay_period_end, hours_worked,
@@ -111,7 +134,8 @@ router.post('/', authenticateToken, authorizeAccountant, [
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in create payroll entry:', err);
+    res.status(500).json({ error: 'An error occurred while creating the payroll entry' });
   }
 });
 
@@ -150,25 +174,30 @@ router.put('/:id', authenticateToken, authorizeAccountant, [
     updateFields.push('updated_at = CURRENT_TIMESTAMP');
 
     const query = `
-      UPDATE payroll_entries 
+      UPDATE payroll_entries pe
       SET ${updateFields.join(', ')}
-      WHERE payroll_id = $${paramCount} 
-      RETURNING *
+      FROM employees e
+      JOIN companies c ON e.company_id = c.company_id
+      WHERE pe.payroll_id = $${paramCount}
+      AND pe.employee_id = e.employee_id
+      AND c.accountant_id = $${paramCount + 1}
+      RETURNING pe.*
     `;
 
-    values.push(id);
+    values.push(id, req.user.accountantId);
 
     const result = await db.query(query, values);
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Payroll entry not found' });
+      return res.status(404).json({ message: 'Payroll entry not found or you do not have permission to update it' });
     }
 
     await logAudit(req.user.userId, 'accountant', 'update_payroll_entry', id);
 
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in update payroll entry:', err);
+    res.status(500).json({ error: 'An error occurred while updating the payroll entry' });
   }
 });
 
@@ -183,16 +212,26 @@ router.delete('/:id', authenticateToken, authorizeAccountant, [
 
   try {
     const { id } = req.params;
-    const result = await db.query('DELETE FROM payroll_entries WHERE payroll_id = $1 RETURNING *', [id]);
+    const result = await db.query(
+      `DELETE FROM payroll_entries pe
+       USING employees e, companies c
+       WHERE pe.payroll_id = $1
+       AND pe.employee_id = e.employee_id
+       AND e.company_id = c.company_id
+       AND c.accountant_id = $2
+       RETURNING pe.*`,
+      [id, req.user.accountantId]
+    );
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Payroll entry not found' });
+      return res.status(404).json({ message: 'Payroll entry not found or you do not have permission to delete it' });
     }
 
     await logAudit(req.user.userId, 'accountant', 'delete_payroll_entry', id);
 
     res.json({ message: 'Payroll entry deleted successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in delete payroll entry:', err);
+    res.status(500).json({ error: 'An error occurred while deleting the payroll entry' });
   }
 });
 
@@ -211,6 +250,12 @@ router.get('/total/:companyId', authenticateToken, authorizeAccountant, [
     const { companyId } = req.params;
     const { startDate, endDate } = req.query;
 
+    // Check if the accountant has access to this company
+    const companyCheck = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
+    if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
+      return res.status(403).json({ error: 'You do not have permission to access this company\'s payroll' });
+    }
+
     const result = await db.query(
       `SELECT 
         SUM(pe.gross_pay) as total_gross,
@@ -225,7 +270,8 @@ router.get('/total/:companyId', authenticateToken, authorizeAccountant, [
 
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in calculate total payroll:', err);
+    res.status(500).json({ error: 'An error occurred while calculating total payroll' });
   }
 });
 
