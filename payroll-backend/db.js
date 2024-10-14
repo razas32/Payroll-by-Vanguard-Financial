@@ -97,13 +97,12 @@ const createTablesQuery = `
   -- Create employee_offboarding table
   CREATE TABLE IF NOT EXISTS employee_offboarding (
     offboarding_id SERIAL PRIMARY KEY,
-    employee_id INTEGER REFERENCES employees(employee_id) UNIQUE,
-    reason_for_leaving TEXT,
+    employee_id INTEGER REFERENCES employees(employee_id),
+    reason_for_leaving VARCHAR(20) NOT NULL,
     last_day_worked DATE NOT NULL,
     payout_accrued_vacation BOOLEAN NOT NULL,
     callback_date DATE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   );
 
   -- Create payroll_entries table

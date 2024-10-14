@@ -65,35 +65,35 @@ router.get('/company/:companyId', authenticateToken, authorizeClientOrAccountant
 
 // Get a single employee
 router.get('/:id', authenticateToken, authorizeClientOrAccountant, [
-    param('id').isInt()
-  ], async (req, res) => {
-    console.log('Get single employee - user:', req.user);
-    console.log('Get single employee - params:', req.params);
-  
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+  param('id').isInt()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { id } = req.params;
+    let result;
+    if (req.user.userType === 'accountant') {
+      result = await db.query('SELECT e.* FROM employees e JOIN companies c ON e.company_id = c.company_id WHERE e.employee_id = $1 AND c.accountant_id = $2', [id, req.user.accountantId]);
+    } else {
+      result = await db.query('SELECT * FROM employees WHERE employee_id = $1 AND company_id = $2', [id, req.user.companyId]);
     }
-  
-    try {
-      const { id } = req.params;
-      const result = await db.query('SELECT * FROM employees WHERE employee_id = $1', [id]);
-  
-      console.log('Query result:', result.rows);
-  
-      if (result.rows.length === 0) {
-        return res.status(404).json({ message: 'Employee not found' });
-      }
-      res.json(result.rows[0]);
-    } catch (err) {
-      console.error('Error in get single employee:', err);
-      res.status(500).json({ error: 'An error occurred while fetching the employee' });
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Employee not found or you do not have permission to view this employee' });
     }
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error in get single employee:', err);
+    res.status(500).json({ error: 'An error occurred while fetching the employee' });
+  }
+});
 
 // Create a new employee
-router.post('/', authenticateToken, authorizeAccountant, [
-  body('company_id').isInt(),
+router.post('/', authenticateToken, authorizeClientOrAccountant, [
+  body('company_id').optional().isInt(),
   body('first_name').notEmpty().trim(),
   body('last_name').notEmpty().trim(),
   body('date_of_birth').isDate(),
@@ -117,30 +117,27 @@ router.post('/', authenticateToken, authorizeAccountant, [
   }
 
   try {
-    const {
-      company_id, first_name, last_name, date_of_birth, full_address, email,
-      phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule,
-      institution_number, transit_number, account_number, consent_electronic_documents
-    } = req.body;
+    const companyId = req.user.userType === 'client' ? req.user.companyId : req.body.company_id;
+    const { first_name, last_name, date_of_birth, full_address, email, phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule, consent_electronic_documents } = req.body;
 
-    // Check if the company belongs to the accountant
-    const companyCheck = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [company_id]);
-    if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
-      return res.status(403).json({ error: 'You do not have permission to add employees to this company' });
+    // If the user is an accountant, check if they have permission to create an employee for this company
+    if (req.user.userType === 'accountant') {
+      const companyCheck = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
+      if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
+        return res.status(403).json({ error: 'Access denied. You do not have permission to create employees for this company.' });
+      }
     }
 
     const result = await db.query(
       `INSERT INTO employees (
         company_id, first_name, last_name, date_of_birth, full_address, email,
         phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule,
-        institution_number, transit_number, account_number, consent_electronic_documents
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
-      [company_id, first_name, last_name, date_of_birth, full_address, email,
-       phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule,
-       institution_number, transit_number, account_number, consent_electronic_documents]
+        consent_electronic_documents
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [companyId, first_name, last_name, date_of_birth, full_address, email, phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule, consent_electronic_documents]
     );
 
-    await logAudit(req.user.userId, 'accountant', 'create_employee', result.rows[0].employee_id);
+    await logAudit(req.user.userId, req.user.userType, 'create_employee', result.rows[0].employee_id);
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -150,7 +147,7 @@ router.post('/', authenticateToken, authorizeAccountant, [
 });
 
 // Update an employee
-router.put('/:id', authenticateToken, authorizeAccountant, [
+router.put('/:id', authenticateToken, authorizeClientOrAccountant, [
   param('id').isInt(),
   body('first_name').optional().notEmpty().trim(),
   body('last_name').optional().notEmpty().trim(),
@@ -191,15 +188,28 @@ router.put('/:id', authenticateToken, authorizeAccountant, [
 
     updateFields.push('updated_at = CURRENT_TIMESTAMP');
 
-    const query = `
-      UPDATE employees 
-      SET ${updateFields.join(', ')}
-      WHERE employee_id = $${paramCount} 
-      AND company_id IN (SELECT company_id FROM companies WHERE accountant_id = $${paramCount + 1})
-      RETURNING *
-    `;
-
-    values.push(id, req.user.accountantId);
+    let query;
+    if (req.user.userType === 'accountant') {
+      query = `
+        UPDATE employees e
+        SET ${updateFields.join(', ')}
+        FROM companies c
+        WHERE e.employee_id = $${paramCount} 
+        AND e.company_id = c.company_id
+        AND c.accountant_id = $${paramCount + 1}
+        RETURNING *
+      `;
+      values.push(id, req.user.accountantId);
+    } else {
+      query = `
+        UPDATE employees 
+        SET ${updateFields.join(', ')}
+        WHERE employee_id = $${paramCount} 
+        AND company_id = $${paramCount + 1}
+        RETURNING *
+      `;
+      values.push(id, req.user.companyId);
+    }
 
     const result = await db.query(query, values);
 
@@ -207,7 +217,7 @@ router.put('/:id', authenticateToken, authorizeAccountant, [
       return res.status(404).json({ message: 'Employee not found or you do not have permission to update' });
     }
 
-    await logAudit(req.user.userId, 'accountant', 'update_employee', id);
+    await logAudit(req.user.userId, req.user.userType, 'update_employee', id);
 
     res.json(result.rows[0]);
   } catch (err) {
@@ -216,35 +226,74 @@ router.put('/:id', authenticateToken, authorizeAccountant, [
   }
 });
 
-// Delete an employee (soft delete by setting is_active to false)
-router.delete('/:id', authenticateToken, authorizeAccountant, [
-  param('id').isInt()
+// Offboard an employee (soft delete and add offboarding information)
+router.post('/:id/offboard', authenticateToken, authorizeClientOrAccountant, [
+  param('id').isInt(),
+  body('reason_for_leaving').isIn(['QUIT', 'FIRED', 'LAID_OFF', 'RETIRED', 'OTHER']),
+  body('last_day_worked').isDate(),
+  body('payout_accrued_vacation').isBoolean(),
+  body('callback_date').optional().isDate()
 ], async (req, res) => {
+  console.log('Offboarding route entered');
+  console.log('Request params:', req.params);
+  console.log('Request body:', req.body);
+  console.log('User:', req.user);
+
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
+    console.log('Validation errors:', errors.array());
     return res.status(400).json({ errors: errors.array() });
   }
 
+  const client = await db.getClient();
+
   try {
+    await client.query('BEGIN');
+    console.log('Transaction begun');
+
     const { id } = req.params;
-    const result = await db.query(
-      `UPDATE employees 
-       SET is_active = false, updated_at = CURRENT_TIMESTAMP 
-       WHERE employee_id = $1 
-       AND company_id IN (SELECT company_id FROM companies WHERE accountant_id = $2) 
-       RETURNING *`,
-      [id, req.user.accountantId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Employee not found or you do not have permission to deactivate' });
+    const { reason_for_leaving, last_day_worked, payout_accrued_vacation, callback_date } = req.body;
+
+    console.log('Checking if employee exists:', id);
+    const employeeCheck = await client.query('SELECT * FROM employees WHERE employee_id = $1', [id]);
+    if (employeeCheck.rows.length === 0) {
+      console.log('Employee not found');
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Employee not found' });
     }
 
-    await logAudit(req.user.userId, 'accountant', 'deactivate_employee', id);
+    console.log('Offboarding employee:', id);
+    
+    // Soft delete the employee
+    const updateResult = await client.query(
+      'UPDATE employees SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE employee_id = $1 RETURNING *',
+      [id]
+    );
+    console.log('Update result:', updateResult.rows);
 
-    res.json({ message: 'Employee deactivated successfully' });
+    console.log('Inserting offboarding record');
+    // Add offboarding information
+    const insertResult = await client.query(
+      `INSERT INTO employee_offboarding (
+        employee_id, reason_for_leaving, last_day_worked, payout_accrued_vacation, callback_date
+      ) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [id, reason_for_leaving, last_day_worked, payout_accrued_vacation, callback_date || null]
+    );
+    console.log('Insert result:', insertResult.rows);
+
+    await client.query('COMMIT');
+    console.log('Transaction committed');
+
+    await logAudit(req.user.userId, req.user.userType, 'offboard_employee', id);
+    console.log('Audit logged');
+
+    res.json({ message: 'Employee offboarded successfully' });
   } catch (err) {
-    console.error('Error in delete employee:', err);
-    res.status(500).json({ error: 'An error occurred while deactivating the employee' });
+    await client.query('ROLLBACK');
+    console.error('Error in offboard employee:', err);
+    res.status(500).json({ error: 'An error occurred while offboarding the employee' });
+  } finally {
+    client.release();
   }
 });
 

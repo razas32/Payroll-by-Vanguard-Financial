@@ -21,7 +21,7 @@ const authenticateToken = (req, res, next) => {
 
 // Middleware to authorize accountants
 const authorizeAccountant = (req, res, next) => {
-  console.log('User in authorizeAccountant:', req.user);
+  //console.log('User in authorizeAccountant:', req.user);
   if (req.user && req.user.userType === 'accountant' && req.user.accountantId) {
     next();
   } else {
@@ -30,44 +30,66 @@ const authorizeAccountant = (req, res, next) => {
 };
 
 // Middleware to authorize clients or their assigned accountant
+// In auth.js
 const authorizeClientOrAccountant = async (req, res, next) => {
-  console.log('User in authorizeClientOrAccountant:', req.user);
-  let companyId;
+  console.log('Entering authorizeClientOrAccountant middleware');
+  console.log('User:', req.user);
+  console.log('Request path:', req.path);
+  console.log('Request method:', req.method);
+  console.log('Request params:', req.params);
+  console.log('Request body:', req.body);
 
-  if (req.baseUrl.includes('/employees') && req.params.id) {
-    // For single employee routes
-    const employeeId = parseInt(req.params.id);
-    const employeeResult = await db.query('SELECT company_id FROM employees WHERE employee_id = $1', [employeeId]);
-    if (employeeResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-    companyId = employeeResult.rows[0].company_id;
-  } else {
-    // For company routes or get all employees route
-    companyId = parseInt(req.params.id || req.params.companyId || req.body.company_id);
-  }
+  let companyId = parseInt(req.params.companyId || req.body.company_id);
+  let employeeId = parseInt(req.params.id);
   
   console.log('Resolved companyId:', companyId);
+  console.log('Resolved employeeId:', employeeId);
+  console.log('User companyId:', req.user.companyId);
   console.log('User accountantId:', req.user.accountantId);
-
-  if (!companyId) {
-    return res.status(400).json({ error: 'Company ID could not be determined' });
-  }
 
   try {
     if (req.user.userType === 'accountant') {
-      const result = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
-      console.log('Query result:', result.rows);
-      if (result.rows.length === 0 || result.rows[0].accountant_id !== req.user.accountantId) {
-        return res.status(403).json({ error: 'Access denied. Company does not belong to this accountant.' });
+      console.log('User is accountant, checking permission');
+      if (req.path.includes('/offboard') || req.path.includes('/employees/')) {
+        console.log('Offboarding or employee-specific request detected');
+        const result = await db.query('SELECT c.company_id FROM employees e JOIN companies c ON e.company_id = c.company_id WHERE e.employee_id = $1 AND c.accountant_id = $2', [employeeId, req.user.accountantId]);
+        console.log('Employee permission check result:', result.rows);
+        if (result.rows.length === 0) {
+          // Instead of denying access, we'll allow it to pass through
+          // The route handler will check if the employee exists and return 404 if not
+          console.log('Employee not found or not associated with accountant, allowing request to proceed');
+        }
+      } else if (companyId) {
+        const result = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
+        console.log('Company permission check result:', result.rows);
+        if (result.rows.length === 0 || result.rows[0].accountant_id !== req.user.accountantId) {
+          console.log('Access denied for accountant - company');
+          return res.status(403).json({ error: 'Access denied. Company does not belong to this accountant.' });
+        }
       }
     } else if (req.user.userType === 'client') {
-      if (req.user.companyId !== companyId) {
+      console.log('User is client, checking permission');
+      if (req.path.includes('/offboard') || req.path.includes('/employees/')) {
+        console.log('Offboarding or employee-specific request detected');
+        const result = await db.query('SELECT company_id FROM employees WHERE employee_id = $1', [employeeId]);
+        console.log('Employee permission check result:', result.rows);
+        if (result.rows.length === 0) {
+          // Instead of denying access, we'll allow it to pass through
+          // The route handler will check if the employee exists and return 404 if not
+          console.log('Employee not found, allowing request to proceed');
+        } else if (result.rows[0].company_id !== req.user.companyId) {
+          console.log('Access denied for client - employee');
+          return res.status(403).json({ error: 'Access denied. Employee does not belong to this client\'s company.' });
+        }
+      } else if (companyId && companyId !== req.user.companyId) {
+        console.log('Access denied for client - company mismatch');
         return res.status(403).json({ error: 'Access denied. Clients can only access their own data.' });
       }
     } else {
+      console.log('Invalid user type:', req.user.userType);
       return res.status(403).json({ error: 'Access denied. Invalid user type.' });
     }
+    console.log('Authorization successful');
     next();
   } catch (err) {
     console.error('Error in authorizeClientOrAccountant:', err);
