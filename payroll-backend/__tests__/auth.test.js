@@ -1,12 +1,18 @@
 const request = require('supertest');
 const express = require('express');
+const path = require('path');
+const fs = require('fs').promises;
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../db');
 
-// Mock the email sending function
+// Mock dependencies
 jest.mock('../utils/emailSender', () => ({
   sendEmail: jest.fn().mockResolvedValue(true)
+}));
+
+jest.mock('../utils/auditLogger', () => ({
+  logAudit: jest.fn(),
 }));
 
 const { sendEmail: mockSendEmail } = require('../utils/emailSender');
@@ -17,12 +23,7 @@ const companyRoutes = require('../routes/companies');
 const employeeRoutes = require('../routes/employees');
 const payrollRoutes = require('../routes/payroll');
 
-// Mock the audit logger
-jest.mock('../utils/auditLogger', () => ({
-  logAudit: jest.fn(),
-}));
-
-// Create a test app
+// Create test app
 const app = express();
 app.use(express.json());
 app.use('/api/auth', authRoutes);
@@ -31,9 +32,38 @@ app.use('/api/employees', employeeRoutes);
 app.use('/api/payroll', payrollRoutes);
 
 describe('API Routes', () => {
-  let accountantToken, clientToken, companyId, employeeId, payrollId, accountantId;
+  let accountantToken, clientToken, companyId, employeeId, payrollId, accountantId, clientUserId;
+  let testFilesDir;
 
   beforeAll(async () => {
+    // Set up test files directory
+    testFilesDir = path.join(__dirname, 'test-files');
+    try {
+      await fs.mkdir(testFilesDir, { recursive: true });
+      
+      // Create test PDF files
+      const testFederalPdf = path.join(testFilesDir, 'test-federal-td1.pdf');
+      const testProvincialPdf = path.join(testFilesDir, 'test-provincial-td1.pdf');
+      testTextFile = path.join(testFilesDir, 'test.txt');
+      
+      const pdfContent = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer<</Root 1 0 R>>');
+      await Promise.all([
+        fs.writeFile(testFederalPdf, pdfContent),
+        fs.writeFile(testProvincialPdf, pdfContent),
+        fs.writeFile(testTextFile, 'This is not a PDF')
+      ]);
+    } catch (err) {
+      console.error('Error setting up test files:', err);
+    }
+
+    // Create uploads directory
+    const uploadsDir = path.join(__dirname, '../uploads/employee-documents');
+    try {
+      await fs.mkdir(uploadsDir, { recursive: true });
+    } catch (err) {
+      if (err.code !== 'EEXIST') console.error('Error creating uploads directory:', err);
+    }
+
     const hashedPassword = await bcrypt.hash('Password123!', 10);
     
     // Create accountant user
@@ -50,37 +80,42 @@ describe('API Routes', () => {
     );
     accountantId = accountantDetailResult.rows[0].accountant_id;
   
-    // Create client user
+    // Create client user and store the ID
     const clientResult = await db.query(
       'INSERT INTO users (email, password, user_type, is_verified) VALUES ($1, $2, $3, $4) RETURNING user_id',
       ['client@test.com', hashedPassword, 'client', true]
     );
-    const clientUserId = clientResult.rows[0].user_id;
+    clientUserId = clientResult.rows[0].user_id; // Store the client user ID
   
-    // Create company and associate with accountant
+    // Create company
     const companyResult = await db.query(
       'INSERT INTO companies (user_id, company_name, contact_person, phone, address, accountant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING company_id',
-      [clientUserId, 'Test Company', 'John Doe', '1234567890', '123 Test St, Test City, TS 12345', accountantId]
+      [clientUserId, 'Test Company', 'John Doe', '1234567890', '123 Test St', accountantId]
     );
     companyId = companyResult.rows[0].company_id;
   
-    // Create an employee
+    // Create an employee with direct deposit info
     const employeeResult = await db.query(
       `INSERT INTO employees (
-        company_id, last_name, first_name, date_of_birth, full_address, email, phone_number, sin,
-        start_date, position, pay_type, pay_rate, pay_schedule, consent_electronic_documents
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING employee_id`,
+        company_id, last_name, first_name, date_of_birth, full_address, email,
+        phone_number, sin, start_date, position, pay_type, pay_rate,
+        pay_schedule, institution_number, transit_number, account_number,
+        consent_electronic_documents
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING employee_id`,
       [
-        companyId, 'Doe', 'Jane', '1990-01-01', '456 Emp St, Emp City, EC 67890', 'jane@testcompany.com',
-        '9876543210', '987654321', '2023-01-01', 'Tester', 'SALARY', 50000, 'BIWEEKLY', true
+        companyId, 'Doe', 'Jane', '1990-01-01', '456 Emp St',
+        'jane@testcompany.com', '9876543210', '987654321', '2023-01-01',
+        'Tester', 'SALARY', 50000, 'BIWEEKLY', '001', '12345',
+        '1234567890', true
       ]
     );
     employeeId = employeeResult.rows[0].employee_id;
   
-    // Create a payroll entry
+    // Create payroll entry
     const payrollResult = await db.query(
       `INSERT INTO payroll_entries (
-        employee_id, pay_period_start, pay_period_end, hours_worked, gross_pay, deductions, net_pay, payment_date
+        employee_id, pay_period_start, pay_period_end, hours_worked,
+        gross_pay, deductions, net_pay, payment_date
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING payroll_id`,
       [employeeId, '2023-01-01', '2023-01-15', 80, 2000, 400, 1600, '2023-01-20']
     );
@@ -88,12 +123,13 @@ describe('API Routes', () => {
   
     // Generate tokens
     accountantToken = jwt.sign(
-      { userId: accountantUserId, userType: 'accountant', accountantId: accountantId },
+      { userId: accountantUserId, userType: 'accountant', accountantId },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
+    
     clientToken = jwt.sign(
-      { userId: clientUserId, userType: 'client', companyId: companyId },
+      { userId: clientUserId, userType: 'client', companyId },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -241,194 +277,465 @@ describe('API Routes', () => {
   });
 
   describe('Employee Routes', () => {
+    const pdfBuffer = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer<</Root 1 0 R>>');
+
+    // This helper creates a valid employee request
+    const createEmployeeRequest = (token) => {
+      const uniqueEmail = `john.doe.${Date.now()}@test.com`;
+      return request(app)  // Use supertest's request directly
+        .post('/api/employees')
+        .set('Authorization', `Bearer ${token}`)
+        .field('first_name', 'John')
+        .field('last_name', 'Doe')
+        .field('date_of_birth', '1990-01-01')
+        .field('full_address', '123 Test St')
+        .field('email', uniqueEmail)
+        .field('phone_number', '+11234567890')
+        .field('sin', '123456789')
+        .field('start_date', '2024-01-01')
+        .field('position', 'Developer')
+        .field('pay_type', 'SALARY')
+        .field('pay_rate', '75000')
+        .field('pay_schedule', 'BIWEEKLY')
+        .field('institution_number', '002')
+        .field('transit_number', '12345')
+        .field('account_number', '1234567')
+        .field('consent_electronic_documents', 'true')
+        .attach('td1_federal', Buffer.from('%PDF-1.4\nFederal'), {
+          filename: 'federal.pdf',
+          contentType: 'application/pdf'
+        })
+        .attach('td1_provincial', Buffer.from('%PDF-1.4\nProvincial'), {
+          filename: 'provincial.pdf',
+          contentType: 'application/pdf'
+        });
+    };
   
     describe('Accountant', () => {
-      it('should be able to create a new employee', async () => {
-        const res = await request(app)
-          .post('/api/employees')
-          .set('Authorization', `Bearer ${accountantToken}`)
-          .send({
-            company_id: companyId,
-            first_name: 'Test',
-            last_name: 'Employee',
-            date_of_birth: '1990-01-01',
-            full_address: '789 Employee St, Emp City, EC 13579',
-            email: 'employee@test.com',
-            phone_number: '5555555555',
-            sin: '123456789',
-            start_date: '2023-01-01',
-            position: 'Tester',
-            pay_type: 'SALARY',
-            pay_rate: 50000,
-            pay_schedule: 'BIWEEKLY',
-            consent_electronic_documents: true
-          });
-        expect(res.statusCode).toEqual(201);
-        expect(res.body).toHaveProperty('employee_id');
+      describe('Get Employees', () => {
+        it('should get all employees for a company with pagination', async () => {
+          const res = await request(app)
+            .get(`/api/employees/company/${companyId}`)
+            .query({ page: 1, limit: 10 })
+            .set('Authorization', `Bearer ${accountantToken}`);
+  
+          expect(res.statusCode).toBe(200);
+          expect(res.body).toHaveProperty('employees');
+          expect(res.body).toHaveProperty('currentPage', 1);
+          expect(res.body).toHaveProperty('totalPages');
+          expect(res.body).toHaveProperty('totalEmployees');
+          expect(Array.isArray(res.body.employees)).toBeTruthy();
+        });
+  
+        it('should search employees by name or email', async () => {
+          const res = await request(app)
+            .get(`/api/employees/company/${companyId}`)
+            .query({ search: 'Doe' })
+            .set('Authorization', `Bearer ${accountantToken}`);
+  
+          expect(res.statusCode).toBe(200);
+          expect(res.body.employees.some(emp => 
+            emp.first_name.includes('Doe') || 
+            emp.last_name.includes('Doe') || 
+            emp.email.includes('doe')
+          )).toBeTruthy();
+        });
+  
+        it('should get a single employee by ID', async () => {
+          const res = await request(app)
+            .get(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${accountantToken}`);
+  
+          expect(res.statusCode).toBe(200);
+          expect(res.body).toHaveProperty('employee_id', employeeId);
+        });
+  
+        it('should get employees from all managed companies', async () => {
+          // First verify access to original company's employees
+          const res1 = await request(app)
+            .get(`/api/employees/company/${companyId}`)
+            .set('Authorization', `Bearer ${accountantToken}`);
+        
+          expect(res1.statusCode).toBe(200);
+          expect(Array.isArray(res1.body.employees)).toBeTruthy();
+          
+          // Create a new user for the second company
+          const newUserResult = await db.query(
+            'INSERT INTO users (email, password, user_type, is_verified) VALUES ($1, $2, $3, $4) RETURNING user_id',
+            [`client2_${Date.now()}@test.com`, await bcrypt.hash('Password123!', 10), 'client', true]
+          );
+        
+          // Create another company that this accountant manages
+          const newCompanyResult = await db.query(
+            'INSERT INTO companies (user_id, company_name, accountant_id) VALUES ($1, $2, $3) RETURNING company_id',
+            [newUserResult.rows[0].user_id, 'Second Test Company', accountantId]
+          );
+          
+          // Verify access to new company's employees
+          const res2 = await request(app)
+            .get(`/api/employees/company/${newCompanyResult.rows[0].company_id}`)
+            .set('Authorization', `Bearer ${accountantToken}`);
+        
+          expect(res2.statusCode).toBe(200);
+          expect(Array.isArray(res2.body.employees)).toBeTruthy();
+        });
       });
-
-      it('should be able to get all employees for a company', async () => {
-        const res = await request(app)
-          .get(`/api/employees/company/${companyId}`)
-          .set('Authorization', `Bearer ${accountantToken}`);
-        expect(res.statusCode).toEqual(200);
-        expect(Array.isArray(res.body.employees)).toBeTruthy();
-      });
-
-      it('should be able to get a single employee', async () => {
-        const res = await request(app)
-          .get(`/api/employees/${employeeId}`)
-          .set('Authorization', `Bearer ${accountantToken}`);
-        expect(res.statusCode).toEqual(200);
-        expect(res.body).toHaveProperty('employee_id');
-        expect(res.body.employee_id).toEqual(employeeId);
-      });
-
-      it('should be able to update an employee', async () => {
-        const res = await request(app)
-          .put(`/api/employees/${employeeId}`)
-          .set('Authorization', `Bearer ${accountantToken}`)
-          .send({
-            position: 'Senior Tester'
-          });
-        expect(res.statusCode).toEqual(200);
-        expect(res.body.position).toEqual('Senior Tester');
-      });
-    });
-
-    describe('Client', () => {
-      it('should be able to get their own employees', async () => {
-        const res = await request(app)
-          .get(`/api/employees/company/${companyId}`)
-          .set('Authorization', `Bearer ${clientToken}`);
-        expect(res.statusCode).toEqual(200);
-        expect(Array.isArray(res.body.employees)).toBeTruthy();
-      });
-
-      it('should be able to create a new employee', async () => {
-        const res = await request(app)
-          .post('/api/employees')
-          .set('Authorization', `Bearer ${clientToken}`)
-          .send({
-            first_name: 'New',
-            last_name: 'Employee',
-            date_of_birth: '1990-01-01',
-            full_address: '789 New St, New City, NC 13579',
-            email: 'new@test.com',
-            phone_number: '5555555555',
-            sin: '123456789',
-            start_date: '2023-01-01',
-            position: 'New Position',
-            pay_type: 'SALARY',
-            pay_rate: 55000,
-            pay_schedule: 'BIWEEKLY',
-            consent_electronic_documents: true
-          });
-        expect(res.statusCode).toEqual(201);
-        expect(res.body).toHaveProperty('employee_id');
-      });
-
-      it('should be able to update their employee', async () => {
-        const res = await request(app)
-          .put(`/api/employees/${employeeId}`)
-          .set('Authorization', `Bearer ${clientToken}`)
-          .send({
-            position: 'Updated Position'
-          });
-        expect(res.statusCode).toEqual(200);
-        expect(res.body.position).toEqual('Updated Position');
-      });
-    });
-
-    describe('Offboarding', () => {
-      let offboardEmployeeId;
-
-      beforeEach(async () => {
-        // Generate a unique email for each test run
-        const uniqueEmail = `offboard_${Date.now()}_${Math.floor(Math.random() * 10000)}@test.com`;
-
-        // Create a new employee for offboarding tests
-        const newEmployeeResult = await db.query(
-          `INSERT INTO employees (
-            company_id, first_name, last_name, date_of_birth, full_address, email,
-            phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule,
-            consent_electronic_documents
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING employee_id`,
-          [companyId, 'Test', 'Offboard', '1990-01-01', '123 Test St', uniqueEmail,
-          '1234567890', '123456789', '2023-01-01', 'Tester', 'SALARY', 50000, 'BIWEEKLY', true]
-        );
-        offboardEmployeeId = newEmployeeResult.rows[0].employee_id;
-
-        // The company is already associated with the accountant in the main setup
-      });
-
-      const offboardEmployee = (token, employeeId) => {
-        return request(app)
-          .post(`/api/employees/${employeeId}/offboard`)
-          .set('Authorization', `Bearer ${token}`)
-          .send({
-            reason_for_leaving: 'QUIT',
-            last_day_worked: '2023-06-30',
-            payout_accrued_vacation: true,
-            callback_date: '2024-01-01'
-          });
-      };
+  
+      describe('Employee Creation', () => {
+        it('should be able to create a new employee with documents', async () => {
+          const res = await request(app)
+            .post('/api/employees')
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .field('company_id', companyId)
+            .field('first_name', 'Test')
+            .field('last_name', 'Employee')
+            .field('date_of_birth', '1990-01-01')
+            .field('full_address', '789 Employee St, Emp City, EC 13579')
+            .field('email', 'employee@test.com')
+            .field('phone_number', '+15555555555')
+            .field('sin', '123456789')
+            .field('start_date', '2023-01-01')
+            .field('position', 'Tester')
+            .field('pay_type', 'SALARY')
+            .field('pay_rate', '50000')
+            .field('pay_schedule', 'BIWEEKLY')
+            .field('institution_number', '002')
+            .field('transit_number', '12345')
+            .field('account_number', '1234567')
+            .field('consent_electronic_documents', 'true')
+            .attach('td1_federal', pdfBuffer, {
+              filename: 'federal.pdf',
+              contentType: 'application/pdf'
+            })
+            .attach('td1_provincial', pdfBuffer, {
+              filename: 'provincial.pdf',
+              contentType: 'application/pdf'
+            });
     
-      it('accountant should be able to offboard an employee', async () => {
-        const res = await offboardEmployee(accountantToken, offboardEmployeeId);
-        expect(res.statusCode).toEqual(200);
-        expect(res.body.message).toEqual('Employee offboarded successfully');
-      });
-    
-      it('client should be able to offboard their employee', async () => {
-        const res = await offboardEmployee(clientToken, offboardEmployeeId);
-        expect(res.statusCode).toEqual(200);
-        expect(res.body.message).toEqual('Employee offboarded successfully');
-      });
-    
-      it('should not allow offboarding with invalid data', async () => {
-        const res = await request(app)
-          .post(`/api/employees/${offboardEmployeeId}/offboard`)
-          .set('Authorization', `Bearer ${accountantToken}`)
-          .send({
-            reason_for_leaving: 'INVALID_REASON',
-            last_day_worked: 'not-a-date',
-            payout_accrued_vacation: 'not-a-boolean',
-          });
-        expect(res.statusCode).toEqual(400);
-        expect(res.body).toHaveProperty('errors');
-      });
-    
-      it('should not allow offboarding a non-existent employee', async () => {
-        const res = await request(app)
-          .post(`/api/employees/99999/offboard`)
-          .set('Authorization', `Bearer ${accountantToken}`)
-          .send({
-            reason_for_leaving: 'QUIT',
-            last_day_worked: '2023-06-30',
-            payout_accrued_vacation: true,
-          });
-        expect(res.statusCode).toEqual(404);
-      });
-    
-      it('should verify employee is inactive after offboarding', async () => {
-        await offboardEmployee(accountantToken, offboardEmployeeId);
-        const employeeRes = await request(app)
-          .get(`/api/employees/${offboardEmployeeId}`)
-          .set('Authorization', `Bearer ${accountantToken}`);
-        expect(employeeRes.statusCode).toEqual(200);
-        expect(employeeRes.body.is_active).toEqual(false);
-      });
-    
-      it('should verify offboarding record is created', async () => {
-        await offboardEmployee(accountantToken, offboardEmployeeId);
-        const offboardingRes = await db.query('SELECT * FROM employee_offboarding WHERE employee_id = $1', [offboardEmployeeId]);
-        expect(offboardingRes.rows.length).toEqual(1);
-        expect(offboardingRes.rows[0].reason_for_leaving).toEqual('QUIT');
-        expect(offboardingRes.rows[0].payout_accrued_vacation).toEqual(true);
+          expect(res.statusCode).toBe(201);
+          expect(res.body).toHaveProperty('employee_id');
+          expect(res.body).toHaveProperty('documents');
+          expect(res.body.documents).toHaveLength(2);
+          expect(res.body.documents.some(doc => doc.document_type === 'TD1_FEDERAL')).toBeTruthy();
+          expect(res.body.documents.some(doc => doc.document_type === 'TD1_PROVINCIAL')).toBeTruthy();
+        });
+  
+      describe('Employee Updates', () => {
+        it('should update employee information', async () => {
+          const res = await request(app)
+            .put(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .send({
+              position: 'Senior Developer',
+              pay_rate: '85000',
+              email: 'updated.email@test.com'
+            });
+        
+          expect(res.statusCode).toBe(200);
+          expect(res.body.position).toBe('Senior Developer');
+          expect(res.body.pay_rate).toBe('85000.00');
+          
+          // Verify the update with a separate GET request
+          const verifyRes = await request(app)
+            .get(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${accountantToken}`);
+          expect(verifyRes.body.email).toBe('updated.email@test.com');
+        });
       });
     });
   });
+  
+    describe('Client', () => {
+      describe('Get Employees', () => {
+        it('should get all employees for their company', async () => {
+          const res = await request(app)
+            .get(`/api/employees/company/${companyId}`)
+            .set('Authorization', `Bearer ${clientToken}`);
+  
+          expect(res.statusCode).toBe(200);
+          expect(Array.isArray(res.body.employees)).toBeTruthy();
+        });
+  
+        it('should get a single employee from their company', async () => {
+          const res = await request(app)
+            .get(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${clientToken}`);
+  
+          expect(res.statusCode).toBe(200);
+          expect(res.body).toHaveProperty('employee_id', employeeId);
+        });
+      });
+  
+      describe('Employee Creation', () => {
+        it('should be able to create a new employee with documents', async () => {
+          const res = await request(app)
+            .post('/api/employees')
+            .set('Authorization', `Bearer ${clientToken}`)
+            .field('first_name', 'New')
+            .field('last_name', 'Employee')
+            .field('date_of_birth', '1990-01-01')
+            .field('full_address', '789 New St, New City, NC 13579')
+            .field('email', 'new@test.com')
+            .field('phone_number', '+15555555555')
+            .field('sin', '123456789')
+            .field('start_date', '2023-01-01')
+            .field('position', 'New Position')
+            .field('pay_type', 'SALARY')
+            .field('pay_rate', '55000')
+            .field('pay_schedule', 'BIWEEKLY')
+            .field('institution_number', '003')
+            .field('transit_number', '54321')
+            .field('account_number', '7654321')
+            .field('consent_electronic_documents', 'true')
+            .attach('td1_federal', pdfBuffer, {
+              filename: 'federal.pdf',
+              contentType: 'application/pdf'
+            })
+            .attach('td1_provincial', pdfBuffer, {
+              filename: 'provincial.pdf',
+              contentType: 'application/pdf'
+            });
+    
+          expect(res.statusCode).toBe(201);
+          expect(res.body).toHaveProperty('employee_id');
+          expect(res.body).toHaveProperty('documents');
+          expect(res.body.documents).toHaveLength(2);
+        });
+      });
+  
+      describe('Employee Updates', () => {
+        it('should update their employee', async () => {
+          const res = await request(app)
+            .put(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${clientToken}`)
+            .send({
+              position: 'Updated Position',
+              pay_rate: '70000'
+            });
+  
+          expect(res.statusCode).toBe(200);
+          expect(res.body.position).toBe('Updated Position');
+          expect(res.body.pay_rate).toBe('70000.00');
+        });
+      });
+    });
+  
+    describe('Validation and Error Handling', () => {
+      describe('Employee Creation Validation', () => {
+        it('should validate required fields', async () => {
+          const res = await request(app)
+            .post('/api/employees')
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .field('company_id', companyId)
+            .attach('td1_federal', pdfBuffer, {
+              filename: 'federal.pdf',
+              contentType: 'application/pdf'
+            })
+            .attach('td1_provincial', pdfBuffer, {
+              filename: 'provincial.pdf',
+              contentType: 'application/pdf'
+            });
+      
+          expect(res.statusCode).toBe(400);
+          expect(res.body).toHaveProperty('errors');
+          expect(res.body.errors).toContainEqual(
+            expect.objectContaining({
+              path: 'first_name',
+              msg: 'Invalid value'
+            })
+          );
+        });
+  
+        it('should validate email format', async () => {
+          const res = await request(app)
+          .post('/api/employees')
+          .set('Authorization', `Bearer ${clientToken}`)
+          .field('first_name', 'New')
+          .field('last_name', 'Employee')
+          .field('date_of_birth', '1990-01-01')
+          .field('full_address', '789 New St, New City, NC 13579')
+          .field('email', 'invalid-email')
+          .field('phone_number', '+15555555555')
+          .field('sin', '123456789')
+          .field('start_date', '2023-01-01')
+          .field('position', 'New Position')
+          .field('pay_type', 'SALARY')
+          .field('pay_rate', '55000')
+          .field('pay_schedule', 'BIWEEKLY')
+          .field('institution_number', '003')
+          .field('transit_number', '54321')
+          .field('account_number', '7654321')
+          .field('consent_electronic_documents', 'true')
+          .attach('td1_federal', pdfBuffer, {
+            filename: 'federal.pdf',
+            contentType: 'application/pdf'
+          })
+          .attach('td1_provincial', pdfBuffer, {
+            filename: 'provincial.pdf',
+            contentType: 'application/pdf'
+          });
+          expect(res.statusCode).toBe(400);
+          expect(res.body.errors).toContainEqual(
+            expect.objectContaining({
+              path: 'email',
+              msg: 'Invalid value'
+            })
+          );
+        });
+  
+        it('should validate banking information format', async () => {
+          const res = await request(app)
+            .post('/api/employees')
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .field('first_name', 'Test')
+            .field('last_name', 'Employee')
+            .field('date_of_birth', '1990-01-01')
+            .field('full_address', '123 Test St')
+            .field('email', `test.${Date.now()}@test.com`)
+            .field('phone_number', '+11234567890')
+            .field('sin', '123456789')
+            .field('start_date', '2024-01-01')
+            .field('position', 'Developer')
+            .field('pay_type', 'SALARY')
+            .field('pay_rate', '75000')
+            .field('pay_schedule', 'BIWEEKLY')
+            .field('institution_number', '1')    // Invalid
+            .field('transit_number', '123')      // Invalid
+            .field('account_number', '123')      // Invalid
+            .field('consent_electronic_documents', 'true')
+            .attach('td1_federal', Buffer.from('%PDF-1.4\nFederal'), {
+              filename: 'federal.pdf',
+              contentType: 'application/pdf'
+            })
+            .attach('td1_provincial', Buffer.from('%PDF-1.4\nProvincial'), {
+              filename: 'provincial.pdf',
+              contentType: 'application/pdf'
+            });
+        
+          expect(res.statusCode).toBe(400);
+          // Match the exact error format your route returns
+          expect(res.body.errors).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'field',
+                path: 'institution_number',
+                value: '1'
+              }),
+              expect.objectContaining({
+                type: 'field',
+                path: 'transit_number',
+                value: '123'
+              }),
+              expect.objectContaining({
+                type: 'field',
+                path: 'account_number',
+                value: '123'
+              })
+            ])
+          );
+        });
+      });
+  
+      describe('Employee Update Validation', () => {
+        it('should validate update fields', async () => {
+          const res = await request(app)
+            .put(`/api/employees/${employeeId}`)
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .send({
+              email: 'invalid-email',
+              pay_rate: -1000,
+              pay_type: 'INVALID_TYPE'
+            });
+  
+          expect(res.statusCode).toBe(400);
+          expect(res.body.errors).toBeDefined();
+        });
+      });
+  
+      describe('Offboarding', () => {
+        it('should validate offboarding reason', async () => {
+          const res = await request(app)
+            .post(`/api/employees/${employeeId}/offboard`)
+            .set('Authorization', `Bearer ${accountantToken}`)
+            .send({
+              reason_for_leaving: 'INVALID_REASON',
+              last_day_worked: '2024-03-31',
+              payout_accrued_vacation: true
+            });
+  
+          expect(res.statusCode).toBe(400);
+          expect(res.body.errors).toContainEqual(
+            expect.objectContaining({
+              path: 'reason_for_leaving',
+            msg: 'Invalid value'
+          })
+        );
+      });
+
+      it('should validate last day worked date', async () => {
+        const res = await request(app)
+          .post(`/api/employees/${employeeId}/offboard`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .send({
+            reason_for_leaving: 'QUIT',
+            last_day_worked: 'not-a-date',
+            payout_accrued_vacation: true
+          });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.body.errors).toContainEqual(
+          expect.objectContaining({
+            path: 'last_day_worked',
+            msg: 'Invalid value'
+          })
+        );
+      });
+
+      it('should create a complete offboarding record', async () => {
+        const lastDayWorked = '2024-03-31';
+        const callbackDate = '2024-06-30';
+        
+        const res = await request(app)
+          .post(`/api/employees/${employeeId}/offboard`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .send({
+            reason_for_leaving: 'QUIT',
+            last_day_worked: lastDayWorked,
+            payout_accrued_vacation: true,
+            callback_date: callbackDate
+          });
+
+        expect(res.statusCode).toBe(200);
+
+        // Verify the offboarding record in database
+        const offboardingRecord = await db.query(
+          'SELECT * FROM employee_offboarding WHERE employee_id = $1',
+          [employeeId]
+        );
+
+        expect(offboardingRecord.rows).toHaveLength(1);
+        expect(offboardingRecord.rows[0]).toMatchObject({
+          employee_id: employeeId,
+          reason_for_leaving: 'QUIT',
+          payout_accrued_vacation: true
+        });
+        
+        // Check dates are properly stored
+        expect(offboardingRecord.rows[0].last_day_worked.toISOString().split('T')[0])
+          .toBe(lastDayWorked);
+        expect(offboardingRecord.rows[0].callback_date.toISOString().split('T')[0])
+          .toBe(callbackDate);
+
+        // Verify employee is marked as inactive
+        const employeeRecord = await db.query(
+          'SELECT is_active FROM employees WHERE employee_id = $1',
+          [employeeId]
+        );
+        expect(employeeRecord.rows[0].is_active).toBe(false);
+      });
+    });
+  });
+});
 
   describe('Payroll Routes', () => {
     describe('Accountant', () => {

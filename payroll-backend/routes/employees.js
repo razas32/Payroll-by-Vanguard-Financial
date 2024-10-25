@@ -1,9 +1,69 @@
+// In employees.js route file:
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { body, query, param, validationResult } = require('express-validator');
 const db = require('../db');
-const { authenticateToken, authorizeClientOrAccountant, authorizeAccountant } = require('../middleware/auth');
+const { authenticateToken, authorizeClientOrAccountant } = require('../middleware/auth');
 const { logAudit } = require('../utils/auditLogger');
+
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, '..', 'uploads', 'employee-documents');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const docType = file.fieldname === 'td1_federal' ? 'federal' : 'provincial';
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `td1-${docType}-${uniqueSuffix}${ext}`);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  // Check content type
+  if (file.mimetype !== 'application/pdf') {
+    return cb(new Error('Only PDF files are allowed'));
+  }
+
+  // Check file extension
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (ext !== '.pdf') {
+    return cb(new Error('Only PDF files are allowed'));
+  }
+
+  cb(null, true);
+};
+
+const upload = multer({
+  storage: storage,
+  fileFilter: fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+    files: 2 // Maximum 2 files
+  }
+});
+
+// Add error handling middleware
+const handleUploadErrors = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 5MB' });
+    }
+    return res.status(400).json({ error: `File upload error: ${err.message}` });
+  } else if (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  next();
+};
 
 // Get all employees (for a specific company, with pagination and search)
 router.get('/company/:companyId', authenticateToken, authorizeClientOrAccountant, [
@@ -91,60 +151,163 @@ router.get('/:id', authenticateToken, authorizeClientOrAccountant, [
   }
 });
 
-// Create a new employee
-router.post('/', authenticateToken, authorizeClientOrAccountant, [
-  body('company_id').optional().isInt(),
-  body('first_name').notEmpty().trim(),
-  body('last_name').notEmpty().trim(),
-  body('date_of_birth').isDate(),
-  body('full_address').notEmpty().trim(),
-  body('email').isEmail().normalizeEmail(),
-  body('phone_number').isMobilePhone(),
-  body('sin').isLength({ min: 9, max: 9 }),
-  body('start_date').isDate(),
-  body('position').notEmpty().trim(),
-  body('pay_type').isIn(['HOURLY', 'SALARY']),
-  body('pay_rate').isFloat({ min: 0 }),
-  body('pay_schedule').isIn(['WEEKLY', 'BIWEEKLY', 'MONTHLY']),
-  body('institution_number').optional().isString(),
-  body('transit_number').optional().isString(),
-  body('account_number').optional().isString(),
-  body('consent_electronic_documents').isBoolean()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
-  try {
-    const companyId = req.user.userType === 'client' ? req.user.companyId : req.body.company_id;
-    const { first_name, last_name, date_of_birth, full_address, email, phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule, consent_electronic_documents } = req.body;
-
-    // If the user is an accountant, check if they have permission to create an employee for this company
-    if (req.user.userType === 'accountant') {
-      const companyCheck = await db.query('SELECT accountant_id FROM companies WHERE company_id = $1', [companyId]);
-      if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
-        return res.status(403).json({ error: 'Access denied. You do not have permission to create employees for this company.' });
+//  create employee route with specific TD1 document requirements
+router.post('/', 
+  authenticateToken, 
+  authorizeClientOrAccountant,
+  (req, res, next) => {
+    upload.fields([
+      { name: 'td1_federal', maxCount: 1 },
+      { name: 'td1_provincial', maxCount: 1 }
+    ])(req, res, (err) => {
+      handleUploadErrors(err, req, res, next);
+    });
+  },
+  [
+    body('company_id').optional().isInt(),
+    body('first_name').notEmpty().trim(),
+    body('last_name').notEmpty().trim(),
+    body('date_of_birth').isDate(),
+    body('full_address').notEmpty().trim(),
+    body('email').isEmail().normalizeEmail(),
+    body('phone_number').isMobilePhone(),
+    body('sin').isLength({ min: 9, max: 9 }),
+    body('start_date').isDate(),
+    body('position').notEmpty().trim(),
+    body('pay_type').isIn(['HOURLY', 'SALARY']),
+    body('pay_rate').isFloat({ min: 0 }),
+    body('pay_schedule').isIn(['WEEKLY', 'BIWEEKLY', 'MONTHLY']),
+    body('institution_number')
+      .isString()
+      .isLength({ min: 3, max: 3 })
+      .matches(/^\d{3}$/),
+    body('transit_number')
+      .isString()
+      .isLength({ min: 5, max: 5 })
+      .matches(/^\d{5}$/),
+    body('account_number')
+      .isString()
+      .isLength({ min: 7, max: 12 })
+      .matches(/^\d+$/),
+    body('consent_electronic_documents').isBoolean()
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
       }
+
+      // Check if both TD1 forms were uploaded
+      if (!req.files?.td1_federal?.[0] || !req.files?.td1_provincial?.[0]) {
+        return res.status(400).json({ 
+          error: 'Both federal and provincial TD1 forms are required for employee creation'
+        });
+      }
+
+      const client = await db.getClient();
+
+      try {
+        await client.query('BEGIN');
+
+        const companyId = req.user.userType === 'client' ? req.user.companyId : req.body.company_id;
+
+        // Accountant permission check
+        if (req.user.userType === 'accountant') {
+          const companyCheck = await client.query(
+            'SELECT accountant_id FROM companies WHERE company_id = $1',
+            [companyId]
+          );
+          if (companyCheck.rows.length === 0 || companyCheck.rows[0].accountant_id !== req.user.accountantId) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({
+              error: 'Access denied. You do not have permission to create employees for this company.'
+            });
+          }
+        }
+
+        // Insert employee
+        const employeeResult = await client.query(
+          `INSERT INTO employees (
+            company_id, first_name, last_name, date_of_birth, full_address,
+            email, phone_number, sin, start_date, position, pay_type,
+            pay_rate, pay_schedule, institution_number, transit_number,
+            account_number, consent_electronic_documents
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          RETURNING *`,
+          [
+            companyId, req.body.first_name, req.body.last_name,
+            req.body.date_of_birth, req.body.full_address, req.body.email,
+            req.body.phone_number, req.body.sin, req.body.start_date,
+            req.body.position, req.body.pay_type, req.body.pay_rate,
+            req.body.pay_schedule, req.body.institution_number,
+            req.body.transit_number, req.body.account_number,
+            req.body.consent_electronic_documents
+          ]
+        );
+
+        const employeeId = employeeResult.rows[0].employee_id;
+
+        // Insert TD1 federal document
+        await client.query(
+          `INSERT INTO employee_documents (
+            employee_id, document_type, file_name, upload_date, document_path
+          ) VALUES ($1, $2, $3, CURRENT_DATE, $4)`,
+          [
+            employeeId,
+            'TD1_FEDERAL',
+            req.files.td1_federal[0].originalname,
+            req.files.td1_federal[0].path
+          ]
+        );
+
+        // Insert TD1 provincial document
+        await client.query(
+          `INSERT INTO employee_documents (
+            employee_id, document_type, file_name, upload_date, document_path
+          ) VALUES ($1, $2, $3, CURRENT_DATE, $4)`,
+          [
+            employeeId,
+            'TD1_PROVINCIAL',
+            req.files.td1_provincial[0].originalname,
+            req.files.td1_provincial[0].path
+          ]
+        );
+
+        // Query to get employee with documents
+        const result = await client.query(
+          `SELECT e.*, 
+            json_agg(json_build_object(
+              'document_id', d.document_id,
+              'document_type', d.document_type,
+              'file_name', d.file_name,
+              'upload_date', d.upload_date
+            )) as documents
+          FROM employees e
+          LEFT JOIN employee_documents d ON e.employee_id = d.employee_id
+          WHERE e.employee_id = $1
+          GROUP BY e.employee_id`,
+          [employeeId]
+        );
+
+        await client.query('COMMIT');
+        await logAudit(req.user.userId, req.user.userType, 'create_employee', employeeId);
+
+        res.status(201).json(result.rows[0]);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error('Error in create employee:', err);
+      res.status(500).json({ error: 'An error occurred while creating the employee' });
     }
-
-    const result = await db.query(
-      `INSERT INTO employees (
-        company_id, first_name, last_name, date_of_birth, full_address, email,
-        phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule,
-        consent_electronic_documents
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-      [companyId, first_name, last_name, date_of_birth, full_address, email, phone_number, sin, start_date, position, pay_type, pay_rate, pay_schedule, consent_electronic_documents]
-    );
-
-    await logAudit(req.user.userId, req.user.userType, 'create_employee', result.rows[0].employee_id);
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error('Error in create employee:', err);
-    res.status(500).json({ error: 'An error occurred while creating the employee' });
   }
-});
+);
+
+
 
 // Update an employee
 router.put('/:id', authenticateToken, authorizeClientOrAccountant, [
